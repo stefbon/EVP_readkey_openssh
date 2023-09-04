@@ -31,7 +31,9 @@ https://www.thedigitalcatonline.com/blog/2018/04/25/rsa-keys/#generating-key-pai
 I want to add that names used by SSH in general, are very SSH specific. For example the names 
 
 ssh-rsa
+
 ssh-dsa
+
 ssh-ed25519
 
 identify the alogorithm, but also the way the public key is saved. For example the format used by ssh-rsa
@@ -45,6 +47,7 @@ software that saves a public key this way.
 More names used exclusivly in SSH are:
 
 rsa-sha2-256
+
 rsa-sha2-512
 
 See:
