@@ -1,11 +1,9 @@
 //
-// $ gcc -o EVP_readkey -lcrypto -lssl EVP_readkey.c
+// $ gcc -o testrpkey -lcrypto -lssl EVP_readpkey.c EVP_utils.c openssh-utils.c str-utils.c utils.c
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#include <sys/stat.h>
 
 #include <openssl/err.h>
 #include <openssl/crypto.h>
@@ -16,236 +14,20 @@
 #include <openssl/evp.h>
 #include <openssl/params.h>
 
-static uint32_t get_uint32(char *buf)
-{
-    unsigned char *tmp=(unsigned char *) buf;
-    return (uint32_t) (((uint32_t) tmp[0] << 24) | ((uint32_t) tmp[1] << 16) | ((uint32_t) tmp[2] << 8) | (uint32_t) tmp[3]);
-}
-
-static int EVP_decodeinplace(char *data, unsigned int length)
-{
-    int result=0;
-
-    if ((length % 4) == 0) {
-        char tmp[length];
-
-        memset(tmp, 0, length);
-        result=EVP_DecodeBlock(tmp, data, length);
-
-        if ((result > 0) && (result <= length)) {
-
-            memcpy(data, tmp, length);
-
-        } else {
-
-            result=0;
-
-        }
-
-    }
-
-    return result;
-
-}
-
-static int EVP_PKEY_fromparams(EVP_PKEY **p_pkey, const char *type, int selection, OSSL_PARAM param[])
-{
-    EVP_PKEY_CTX *ctx=NULL;
-    int result=0;
-
-    ctx=EVP_PKEY_CTX_new_from_name(NULL, type, NULL);
-
-    if (ctx==NULL) {
-
-        fprintf(stdout, "unable to create pkey ctx.\n");
-        goto out;
-
-    }
-
-    if (EVP_PKEY_fromdata_init(ctx) <= 0) {
-
-        fprintf(stdout, "unable to create pkey ctx.\n");
-        goto out;
-
-    }
-
-    if (EVP_PKEY_fromdata(ctx, p_pkey, selection, param) <= 0) {
-
-        fprintf(stdout, "unable to create pkey from data.\n");
-        goto out;
-
-    }
-
-    result=1;
-
-    out:
-    if (ctx) EVP_PKEY_CTX_free(ctx);
-    return result;
-
-}
-
-static int EVP_PKEY_read_openssh_public_key_data(EVP_PKEY **p_pkey, char *data, unsigned int size)
-{
-    int result=0;
-
-    if (size <= 12) {
-
-        /* data exists at least form 3 ssh strings, so will be at least 3 x 4 bytes long, since
-            every ssh string has a length field of 4 bytes long
-        */
-
-        fprintf(stdout, "size buffer too small (%u).\n", size);
-        goto out;
-
-    }
-
-    if (memcmp(data, "ssh-rsa ", 8)==0) {
-        char *pos=data + 8;
-        char *sep=NULL;
-        uint32_t length=0;
-
-        if (size <= 20) {
-
-            fprintf(stdout, "size buffer too small (%u).\n", size);
-            goto out;
-
-        }
-
-        length = (unsigned int) (data + size - pos);
-        sep=memchr(pos, ' ', length); /* if there is a next field it's seperated with a space */
-        if (sep) length=(unsigned int)(sep - pos);
-
-        /* length must be divisible by four */
-
-        if (EVP_decodeinplace(pos, length)==0) {
-
-            fprintf(stdout, "unable to decode.\n");
-            goto out;
-
-        }
-
-        length=get_uint32(pos);
-        pos+=4;
-
-        if (length==strlen("ssh-rsa") && memcmp(pos, "ssh-rsa", length)==0) {
-            OSSL_PARAM param[3];
-
-            pos+=length;
-            length=get_uint32(pos);
-            pos += 4;
-
-            if ((length==0) || (length > (unsigned int)(data + size - pos))) {
-
-                fprintf(stdout, "invalid length (%u).\n", length);
-                goto out;
-
-            }
-
-            param[0]=OSSL_PARAM_construct_BN("e", pos, length);
-            pos += length;
-
-            length= get_uint32(pos);
-            pos += 4;
-
-            if ((length==0) || (length > (unsigned int)(data + size - pos))) {
-
-                fprintf(stdout, "invalid length (%u).\n", length);
-                goto out;
-
-            }
-
-            param[1]=OSSL_PARAM_construct_BN("n", pos, length);
-            pos += length;
-
-            param[2]=OSSL_PARAM_construct_end();
-
-            if (EVP_PKEY_fromparams(p_pkey, "RSA", OSSL_KEYMGMT_SELECT_PUBLIC_KEY, param)) {
-
-                fprintf(stdout, "read RSA key.\n");
-                result=1;
-
-            }
-
-        }
-
-    }
-
-    out:
-    return result;
-
-}
-
-static int EVP_PKEY_read_openssh_public_key_file(EVP_PKEY **p_pkey, BIO *file)
-{
-    int result=0;
-    char *data=NULL;
-    unsigned int size=1024;
-    char *sep=NULL;
-
-    readline:
-
-    data=realloc(data, size);
-    if (data==NULL) {
-
-        fprintf(stdout, "not able to allocate %u bytes.\n", size);
-        return 0;
-
-    }
-
-    BIO_seek(file, 0);
-    memset(data, 0, size);
-    result=BIO_read(file, data, size);
-
-    if (result==0 || result==-1) {
-
-        fprintf(stdout, "not able to read %u bytes from file.\n", size);
-        if (data) free(data);
-        return 0;
-
-    }
-
-    /* stop if a newline is found or the whole file is read */
-
-    sep=memchr(data, '\n', (size_t) result);
-
-    if (sep) {
-
-        fprintf(stdout, "line length %u bytes (size %u).\n", (unsigned int)(sep - data), size);
-        size=(unsigned int) (sep - data);
-
-    } else if (BIO_eof(file)) {
-
-        fprintf(stdout, "total file read %u bytes (size=%u).\n", (unsigned int) result, size);
-        size=(unsigned int) result;
-
-    } else {
-
-        size+=512;
-        goto readline;
-
-    }
-
-    result=EVP_PKEY_read_openssh_public_key_data(p_pkey, data, size);
-
-    out:
-    if (data) free(data);
-    return result;
-}
-
-static int BIO_read_ssh_algorithm(BIO *file, char *buffer, unsigned int size)
-{
-    int filepos=BIO_tell(file);
-    int result=BIO_get_line(file, buffer, size);
-
-    BIO_seek(file, filepos);
-    return result;
-}
+#include "str-utils.h"
+#include "utils.h"
+
+#include "EVP_readpkey.h"
+#include "EVP_utils.h"
+#include "openssh-utils.h"
 
 int main(int argc, char **argv)
 {
     BIO *fpkey=NULL;
     EVP_PKEY *pkey=NULL;
-    unsigned char ispublic=0;
+    signed char ispublic=-1;
+    struct ssh_algorithm_s *guessed=NULL;
+    unsigned char secret=0;
 
     if (argc<2) {
 
@@ -269,6 +51,10 @@ int main(int argc, char **argv)
 
             ispublic=1;
 
+        } else if (strcasecmp(argv[2], "private")==0) {
+
+            ispublic=0;
+
         } else {
 
             fprintf(stdout, "not reckognized second argument %s.\n", argv[2]);
@@ -278,75 +64,86 @@ int main(int argc, char **argv)
 
     }
 
-    if (ispublic) {
-        char line[65];
-        int result=0;
-        char *sep=NULL;
+    guessed=get_ssh_algorithm_by_filename(argv[1], &secret);
 
-        memset(line, 0, 65);
-        result=BIO_read_ssh_algorithm(fpkey, line, 64);
-        if (result <= 0) goto out;
+    if ((ispublic==1) || (ispublic==0)) {
 
-        sep=memchr(line, ' ', (unsigned int) result);
+        if (secret == ispublic) {
 
-        if (sep) {
+            /* cannot be both true */
 
-            *sep='\0';
-            fprintf(stdout, "found algorithm %s.\n", line);
-
-            if (strcmp(line, "ssh-rsa")==0) {
-
-                if (EVP_PKEY_read_openssh_public_key_file(&pkey, fpkey)==0) {
-
-                    fprintf(stdout, "cannot read data from openssh.\n");
-                    goto out;
-
-                }
-
-            } else {
-
-                fprintf(stdout, "algorithm %s not supported.\n", line);
-
-            }
-
-        } else {
-
-            fprintf(stdout, "no field seperator found\n");
+            fprintf(stdout, "warning: argument public/private (%i) conflicts with guessed secret (%u) from filename ... ignoring guessed value\n", ispublic, secret);
 
         }
 
     } else {
-        OSSL_DECODER_CTX *dctx=NULL;
 
-        /* private key has a PEM encoded key */
+        ispublic=(secret) ? 0 : 1;
 
-        dctx=OSSL_DECODER_CTX_new_for_pkey(&pkey, "PEM", NULL, NULL, OSSL_KEYMGMT_SELECT_KEYPAIR, NULL, NULL);
+    }
 
-        if (dctx==NULL) {
+    if (ispublic) {
+        char line[65]; /* algo names are max 64, use 65 for terminating zero byte */
+        struct ssh_algorithm_s *found=NULL;
 
-            fprintf(stdout, "cannot create decoder.\n");
-            goto out;
+        memset(line, 0, 65);
+        found=BIO_read_ssh_algorithm(fpkey, line, 64);
 
-        }
+        if (found) {
 
-        if (OSSL_DECODER_from_bio(dctx, fpkey)) {
+            if (guessed && (guessed != found)) {
 
-            fprintf(stdout, "decoder finished.\n");
+                fprintf(stdout, "found algorithm %s differs from guessed %s.\n", line, guessed->name);
+                goto out;
+
+            }
+
+            fprintf(stdout, "found algorithm %s.\n", line);
+
+            if (OPENSSH_read_public_key_fileline(&pkey, fpkey, found, 1)==0) {
+
+                fprintf(stdout, "cannot read data from openssh.\n");
+                goto out;
+
+            }
 
         } else {
 
-            fprintf(stdout, "cannot decode.\n");
+            fprintf(stdout, "algorithm %s not supported/reckognized.\n", line);
 
-            if (pkey) {
+        }
 
-                EVP_PKEY_free(pkey);
-                pkey=NULL;
+    } else {
+        struct utils_buffer_s buffer=UTILS_BUFFER_INIT;
+        unsigned int format=OPENSSH_check_format(fpkey, &buffer);
+
+        if (format==PKEY_FILE_HEADER_OPENSSH_PRIVATE) {
+
+            if (OPENSSH_read_openssh_format_data(&pkey, &buffer, format, 1, guessed)) {
+
+                fprintf(stdout, "private key read from OPENSSH format.\n");
+
+            }
+
+            UTILS_free_buffer(&buffer);
+
+        } else {
+
+            UTILS_free_buffer(&buffer);
+
+            if (format==PKEY_FILE_HEADER_RSA_PRIVATE) {
+
+                /* read using the openssl build in decoder */
+
+                if (EVP_PKEY_read_with_decoder(&pkey, fpkey, "PEM", 1)) {
+
+                    fprintf(stdout, "private key read from PEM format.\n");
+
+                }
 
             }
 
         }
-
-        OSSL_DECODER_CTX_free(dctx);
 
     }
 
